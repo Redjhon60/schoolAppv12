@@ -1,0 +1,165 @@
+name: Build Windows EXE — Le Schéma SGS
+
+on:
+  push:
+    branches:
+      - main
+      - master
+    tags:
+      - 'v*'
+  pull_request:
+    branches:
+      - main
+      - master
+  workflow_dispatch:   # Allow manual trigger from GitHub UI
+
+jobs:
+  build-windows:
+    name: Build Windows Executable
+    runs-on: windows-latest
+
+    steps:
+      # ── 1. Checkout source ────────────────────────────────────────
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      # ── 2. Set up Python ──────────────────────────────────────────
+      - name: Set up Python 3.11
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.11'
+          cache: 'pip'
+
+      # ── 3. Upgrade pip & install dependencies ────────────────────
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip wheel setuptools
+          pip install PySide6>=6.5.0
+          pip install SQLAlchemy>=2.0.0
+          pip install reportlab>=4.0.0
+          pip install Pillow>=10.0.0
+          pip install qrcode[pil]>=7.4.0
+          pip install openpyxl>=3.1.0
+          pip install bcrypt>=4.0.0
+          pip install matplotlib>=3.7.0
+          pip install pyinstaller>=6.0.0
+
+      # ── 4. Verify imports before build ───────────────────────────
+      - name: Verify critical imports
+        run: |
+          python -c "import PySide6; print('PySide6:', PySide6.__version__)"
+          python -c "import sqlalchemy; print('SQLAlchemy:', sqlalchemy.__version__)"
+          python -c "import reportlab; print('ReportLab OK')"
+          python -c "import qrcode; print('QRCode OK')"
+          python -c "import openpyxl; print('OpenPyXL OK')"
+          python -c "import matplotlib; print('Matplotlib:', matplotlib.__version__)"
+
+      # ── 5. Initialize database (creates school.db with defaults) ──
+      - name: Initialize SQLite database
+        run: |
+          python -c "
+          import sys, os
+          sys.path.insert(0, '.')
+          from models.database import init_db
+          init_db()
+          print('Database initialized OK')
+          "
+
+      # ── 6. Build with PyInstaller ─────────────────────────────────
+      - name: Build EXE with PyInstaller
+        run: |
+          pyinstaller school.spec --clean --noconfirm
+        env:
+          PYTHONOPTIMIZE: '1'
+
+      # ── 7. Verify the build output ───────────────────────────────
+      - name: Verify build output
+        run: |
+          if (Test-Path "dist\LeSchema_SGS\LeSchema_SGS.exe") {
+            Write-Host "✅ EXE found!"
+            $size = (Get-Item "dist\LeSchema_SGS\LeSchema_SGS.exe").Length / 1MB
+            Write-Host "   Size: $([math]::Round($size, 2)) MB"
+          } else {
+            Write-Host "❌ EXE NOT FOUND — build failed"
+            Get-ChildItem dist -Recurse | Select-Object FullName
+            exit 1
+          }
+        shell: pwsh
+
+      # ── 8. Copy runtime data into dist folder ────────────────────
+      - name: Copy runtime folders into dist
+        run: |
+          # Create required directories inside the dist folder
+          New-Item -ItemType Directory -Force -Path "dist\LeSchema_SGS\database"
+          New-Item -ItemType Directory -Force -Path "dist\LeSchema_SGS\receipts"
+          New-Item -ItemType Directory -Force -Path "dist\LeSchema_SGS\backups"
+          New-Item -ItemType Directory -Force -Path "dist\LeSchema_SGS\documents"
+
+          # Copy pre-initialized database so the app starts with defaults
+          if (Test-Path "database\school.db") {
+            Copy-Item "database\school.db" "dist\LeSchema_SGS\database\school.db"
+            Write-Host "✅ Database copied"
+          }
+
+          # Copy README
+          Copy-Item "README.md" "dist\LeSchema_SGS\README.md" -ErrorAction SilentlyContinue
+          Write-Host "✅ Runtime folders ready"
+        shell: pwsh
+
+      # ── 9. Create ZIP archive of the full dist ───────────────────
+      - name: Create release ZIP
+        run: |
+          $version = "${{ github.ref_name }}"
+          if ($version -notmatch '^v') { $version = "latest" }
+          $zipName = "LeSchema_SGS_Windows_$version.zip"
+          Compress-Archive -Path "dist\LeSchema_SGS\*" -DestinationPath $zipName -Force
+          Write-Host "✅ Archive created: $zipName"
+          $zipSize = (Get-Item $zipName).Length / 1MB
+          Write-Host "   Size: $([math]::Round($zipSize, 2)) MB"
+          # Save the name for later steps
+          echo "ZIP_NAME=$zipName" >> $env:GITHUB_ENV
+        shell: pwsh
+
+      # ── 10. Upload artifact (available for every build) ──────────
+      - name: Upload build artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: LeSchema_SGS_Windows
+          path: ${{ env.ZIP_NAME }}
+          retention-days: 30
+          if-no-files-found: error
+
+      # ── 11. Create GitHub Release (only on version tags) ─────────
+      - name: Create GitHub Release
+        if: startsWith(github.ref, 'refs/tags/v')
+        uses: softprops/action-gh-release@v2
+        with:
+          name: "Le Schéma SGS ${{ github.ref_name }}"
+          body: |
+            ## 🎓 Le Schéma — Système de Gestion Scolaire ${{ github.ref_name }}
+
+            ### 📥 Installation Windows
+            1. Téléchargez `LeSchema_SGS_Windows_${{ github.ref_name }}.zip`
+            2. Extrayez dans un dossier de votre choix (ex: `C:\LeSchema\`)
+            3. Double-cliquez sur `LeSchema_SGS.exe`
+            4. Aucune installation Python requise — tout est inclus!
+
+            ### 🔐 Identifiants par défaut
+            | Rôle | Login | Mot de passe |
+            |------|-------|-------------|
+            | Admin | `admin` | `admin123` |
+            | Comptable | `comptable` | `compta123` |
+            | Secrétaire | `secretaire` | `secr123` |
+
+            ### ✅ Fonctionnalités
+            - Tableau de bord avec graphiques
+            - Gestion élèves & paiements
+            - Reçus PDF automatiques avec QR code
+            - Personnel & salaires
+            - Dépenses, transport, emploi du temps
+            - Rapports PDF & exports Excel
+          files: ${{ env.ZIP_NAME }}
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
